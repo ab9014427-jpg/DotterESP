@@ -6,6 +6,8 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Utility class for sending Discord webhook messages
@@ -14,6 +16,14 @@ public class DiscordWebhook {
     private final String webhookUrl;
     private static final DateTimeFormatter DATE_TIME_FORMATTER = 
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    
+    // Thread pool for webhook requests to prevent thread exhaustion
+    private static final ExecutorService WEBHOOK_EXECUTOR = 
+        Executors.newFixedThreadPool(2, r -> {
+            Thread t = new Thread(r, "DotterESP-Webhook-Thread");
+            t.setDaemon(true);
+            return t;
+        });
 
     public DiscordWebhook(String webhookUrl) {
         this.webhookUrl = webhookUrl;
@@ -45,8 +55,8 @@ public class DiscordWebhook {
      * @param content The message content
      */
     private void sendMessage(String content) {
-        // Run in a separate thread to avoid blocking the game
-        new Thread(() -> {
+        // Use thread pool to avoid blocking the game and prevent thread exhaustion
+        WEBHOOK_EXECUTOR.submit(() -> {
             try {
                 URL url = new URL(webhookUrl);
                 HttpURLConnection connection = (HttpURLConnection) url.openConnection();
@@ -55,9 +65,9 @@ public class DiscordWebhook {
                 connection.setRequestProperty("User-Agent", "DotterESP-Webhook");
                 connection.setDoOutput(true);
 
-                // Create JSON payload
-                String jsonPayload = String.format("{\"content\": \"%s\"}", 
-                    content.replace("\"", "\\\"").replace("\n", "\\n"));
+                // Create JSON payload with proper escaping
+                String escapedContent = escapeJson(content);
+                String jsonPayload = String.format("{\"content\": \"%s\"}", escapedContent);
 
                 try (OutputStream os = connection.getOutputStream()) {
                     byte[] input = jsonPayload.getBytes(StandardCharsets.UTF_8);
@@ -66,14 +76,68 @@ public class DiscordWebhook {
 
                 int responseCode = connection.getResponseCode();
                 if (responseCode < 200 || responseCode >= 300) {
-                    System.err.println("[DotterESP] Discord webhook failed with code: " + responseCode);
+                    String errorMsg = connection.getResponseMessage();
+                    System.err.println("[DotterESP] Discord webhook failed with code " 
+                        + responseCode + ": " + errorMsg);
                 }
 
                 connection.disconnect();
             } catch (Exception e) {
                 System.err.println("[DotterESP] Failed to send Discord webhook: " + e.getMessage());
             }
-        }, "DotterESP-Webhook-Thread").start();
+        });
+    }
+
+    /**
+     * Escape special characters for JSON strings
+     * @param str The string to escape
+     * @return The escaped string safe for JSON
+     */
+    private static String escapeJson(String str) {
+        if (str == null) {
+            return "";
+        }
+        
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < str.length(); i++) {
+            char ch = str.charAt(i);
+            switch (ch) {
+                case '"':
+                    sb.append("\\\"");
+                    break;
+                case '\\':
+                    sb.append("\\\\");
+                    break;
+                case '\b':
+                    sb.append("\\b");
+                    break;
+                case '\f':
+                    sb.append("\\f");
+                    break;
+                case '\n':
+                    sb.append("\\n");
+                    break;
+                case '\r':
+                    sb.append("\\r");
+                    break;
+                case '\t':
+                    sb.append("\\t");
+                    break;
+                default:
+                    // Control characters
+                    if (ch < ' ') {
+                        String hex = Integer.toHexString(ch);
+                        sb.append("\\u");
+                        for (int j = 0; j < 4 - hex.length(); j++) {
+                            sb.append('0');
+                        }
+                        sb.append(hex);
+                    } else {
+                        sb.append(ch);
+                    }
+            }
+        }
+        return sb.toString();
     }
 
     /**

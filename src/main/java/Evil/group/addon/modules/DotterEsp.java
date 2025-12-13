@@ -324,6 +324,22 @@ public class DotterEsp extends Module {
     private String entityTypeName(Entity e) {
         return e.getType().getName().getString();
     }
+    
+    // Helper method to get currently visible Bedrock players
+    private List<AbstractClientPlayerEntity> getCurrentBedrockPlayers() {
+        List<AbstractClientPlayerEntity> bedrockPlayers = new ArrayList<>();
+        if (mc.world == null || mc.player == null) {
+            return bedrockPlayers;
+        }
+        
+        for (AbstractClientPlayerEntity p : mc.world.getPlayers()) {
+            if (p == mc.player) continue;
+            if (!isBedrock(p)) continue;
+            bedrockPlayers.add(p);
+        }
+        
+        return bedrockPlayers;
+    }
 
     // client side chat with colored [DotterEsp]
     private void chatLocal(String msg) {
@@ -367,12 +383,10 @@ public class DotterEsp extends Module {
 
         // Bedrock announce (client side)
         if (notifyBedrockSeen.get()) {
+            List<AbstractClientPlayerEntity> bedrockPlayers = getCurrentBedrockPlayers();
             Set<UUID> currentlyVisible = new HashSet<>();
 
-            for (AbstractClientPlayerEntity p : mc.world.getPlayers()) {
-                if (p == mc.player) continue;
-                if (!isBedrock(p)) continue;
-
+            for (AbstractClientPlayerEntity p : bedrockPlayers) {
                 UUID id = p.getUuid();
                 currentlyVisible.add(id);
 
@@ -394,12 +408,10 @@ public class DotterEsp extends Module {
             if (webhookUrl != null && !webhookUrl.trim().isEmpty() 
                 && DiscordWebhook.isValidWebhookUrl(webhookUrl)) {
                 
+                List<AbstractClientPlayerEntity> bedrockPlayers = getCurrentBedrockPlayers();
                 Set<UUID> currentlyVisible = new HashSet<>();
                 
-                for (AbstractClientPlayerEntity p : mc.world.getPlayers()) {
-                    if (p == mc.player) continue;
-                    if (!isBedrock(p)) continue;
-
+                for (AbstractClientPlayerEntity p : bedrockPlayers) {
                     UUID id = p.getUuid();
                     currentlyVisible.add(id);
 
