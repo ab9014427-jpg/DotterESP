@@ -32,6 +32,8 @@ import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Box;
+import baritone.api.BaritoneAPI;
+import baritone.api.IBaritone;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -113,6 +115,87 @@ private final Setting<Boolean> keepRunningNoFrames = sgGeneral.add(new BoolSetti
     .build()
 );
 
+private final Setting<Boolean> onlyPlaceEmptyFrames = sgGeneral.add(new BoolSetting.Builder()
+    .name("only-place-empty-frames")
+    .description("If enabled, only place maps in empty frames. Will not break/replace existing maps.")
+    .defaultValue(false)
+    .build()
+);
+
+    // -----------------------------
+    // Baritone Auto-Explore settings
+    // -----------------------------
+    private final SettingGroup sgBaritone = settings.createGroup("Baritone Explore");
+
+    private final Setting<Boolean> enableAutoExplore = sgBaritone.add(new BoolSetting.Builder()
+        .name("enable-auto-explore")
+        .description("Enable Baritone auto-explore functionality with radius limit.")
+        .defaultValue(false)
+        .onChanged(enabled -> {
+            if (enabled && isActive()) {
+                startBaritoneExplore();
+            } else if (!enabled) {
+                stopBaritoneExplore();
+            }
+        })
+        .build()
+    );
+
+    private final Setting<Integer> exploreRadius = sgBaritone.add(new IntSetting.Builder()
+        .name("explore-radius")
+        .description("Maximum distance in blocks from origin to explore.")
+        .defaultValue(2000)
+        .min(100)
+        .max(100000)
+        .sliderRange(100, 10000)
+        .visible(() -> enableAutoExplore.get())
+        .build()
+    );
+
+    private final Setting<Integer> originX = sgBaritone.add(new IntSetting.Builder()
+        .name("origin-x")
+        .description("X coordinate of exploration origin.")
+        .defaultValue(0)
+        .range(-30000000, 30000000)
+        .sliderRange(-10000, 10000)
+        .visible(() -> enableAutoExplore.get())
+        .build()
+    );
+
+    private final Setting<Integer> originZ = sgBaritone.add(new IntSetting.Builder()
+        .name("origin-z")
+        .description("Z coordinate of exploration origin.")
+        .defaultValue(0)
+        .range(-30000000, 30000000)
+        .sliderRange(-10000, 10000)
+        .visible(() -> enableAutoExplore.get())
+        .build()
+    );
+
+    private final Setting<Boolean> autoRestartExplore = sgBaritone.add(new BoolSetting.Builder()
+        .name("auto-restart-explore")
+        .description("Automatically restart exploration when exceeding radius.")
+        .defaultValue(true)
+        .visible(() -> enableAutoExplore.get())
+        .build()
+    );
+
+    private final Setting<Integer> checkIntervalTicks = sgBaritone.add(new IntSetting.Builder()
+        .name("check-interval")
+        .description("How often to check distance from origin (in ticks).")
+        .defaultValue(20)
+        .min(1)
+        .max(200)
+        .sliderRange(1, 100)
+        .visible(() -> enableAutoExplore.get())
+        .build()
+    );
+
+    // Baritone state tracking
+    private IBaritone baritone;
+    private boolean baritoneExploreActive = false;
+    private int exploreTickCounter = 0;
+
     private static final int MAX_PLACES_PER_WINDOW = 9;
     private static final long PLACE_WINDOW_MS = 300;
     private final ArrayDeque<Long> placeTimes = new ArrayDeque<>();
@@ -136,6 +219,12 @@ private boolean warnedOutOfFrames = false;
     @EventHandler
     private void onTick(TickEvent.Pre ignored) {
         ticksSinceLastPlace++; 
+        
+        // Handle Baritone auto-explore if enabled
+        if (enableAutoExplore.get()) {
+            handleBaritoneExplore();
+        }
+        
                 // Ensure we have a filled map in the hotbar; if not, try to pull one in from inventory.
         FindItemResult itemResult = InvUtils.findInHotbar(Items.FILLED_MAP);
         if (!itemResult.found()) {
@@ -192,7 +281,7 @@ if (placeFrames.get() && !haveAnyFrames) {
                 }
                 pending.put(itemFrame.getId(), 1);
                 return;
-            } else if (stack.getItem() != Items.FILLED_MAP || !InvUtils.findInHotbar(item -> item.getItem() == Items.FILLED_MAP && item.getComponents().equals(itemFrame.getHeldItemStack().getComponents())).found()) {
+            } else if (!onlyPlaceEmptyFrames.get() && (stack.getItem() != Items.FILLED_MAP || !InvUtils.findInHotbar(item -> item.getItem() == Items.FILLED_MAP && item.getComponents().equals(itemFrame.getHeldItemStack().getComponents())).found())) {
                 mc.player.swingHand(Hand.MAIN_HAND);
                 mc.interactionManager.attackEntity(mc.player, itemFrame);
                 pending.put(itemFrame.getId(), 1);
@@ -406,6 +495,16 @@ public void onActivate() {
             toggledFreeYaw = true;
         }
     }
+    
+    // Initialize Baritone if auto-explore is enabled
+    if (enableAutoExplore.get()) {
+        baritone = BaritoneAPI.getProvider().getPrimaryBaritone();
+        if (baritone != null) {
+            startBaritoneExplore();
+        } else {
+            error("Baritone not found. Auto-explore disabled.");
+        }
+    }
 }
 
 @Override
@@ -423,6 +522,68 @@ public void onDeactivate() {
         restoreAfterNextMapPlace = false;
         restoreHotbarSlot = -1;
     }
+    
+    // Stop Baritone exploration
+    stopBaritoneExplore();
 }
+
+    // -----------------------------
+    // Baritone Auto-Explore Methods
+    // -----------------------------
+    
+    private void handleBaritoneExplore() {
+        if (mc.player == null || baritone == null || !autoRestartExplore.get()) return;
+        
+        exploreTickCounter++;
+        
+        // Only check distance periodically
+        if (exploreTickCounter >= checkIntervalTicks.get()) {
+            exploreTickCounter = 0;
+            checkExploreDistance();
+        }
+    }
+    
+    private void checkExploreDistance() {
+        if (mc.player == null) return;
+        
+        BlockPos playerPos = mc.player.getBlockPos();
+        int dx = playerPos.getX() - originX.get();
+        int dz = playerPos.getZ() - originZ.get();
+        double distanceSq = dx * dx + dz * dz;
+        double radiusSq = exploreRadius.get() * exploreRadius.get();
+        
+        // If beyond radius, restart exploration
+        if (distanceSq > radiusSq) {
+            int currentDist = (int)Math.sqrt(distanceSq);
+            warning("Exceeded exploration radius (" + currentDist + " > " + exploreRadius.get() + "). Restarting...");
+            startBaritoneExplore();
+        }
+    }
+    
+    private void startBaritoneExplore() {
+        if (baritone == null) {
+            baritone = BaritoneAPI.getProvider().getPrimaryBaritone();
+            if (baritone == null) {
+                error("Baritone not found.");
+                return;
+            }
+        }
+        
+        // Cancel any existing tasks
+        baritone.getPathingBehavior().cancelEverything();
+        
+        // Start exploring from origin
+        baritone.getExploreProcess().explore(originX.get(), originZ.get());
+        baritoneExploreActive = true;
+        info("Baritone exploration started at (" + originX.get() + ", " + originZ.get() + ") with " + exploreRadius.get() + " block radius.");
+    }
+    
+    private void stopBaritoneExplore() {
+        if (baritone != null && baritoneExploreActive) {
+            baritone.getPathingBehavior().cancelEverything();
+            baritoneExploreActive = false;
+            info("Baritone exploration stopped.");
+        }
+    }
 
 }
